@@ -1,0 +1,400 @@
+%%% A Prelude for Consize in Consize
+%%% Copyright (c) 2012, Dominikus Herzberg, Heilbronn University
+%%% New BSD License: http://opensource.org/licenses/BSD-3-Clause
+
+% A TINY BOOTIMAGE
+
+\ bootimage.txt slurp uncomment tokenize
+  emptystack \ continue push \ concat push \ rot push
+  \ top push \ swap push \ pop push \ dup push \ swap push
+ call/cc
+
+% DEFINITION OF META-WORDS
+
+: read-word    ( wrd -- wrd ) ;
+: read-mapping ( map -- map ) ;
+
+% STACK SHUFFLING
+
+: 2drop ( x y -- ) drop drop ;
+: 3drop ( x y z -- ) drop drop drop ;
+: 2dup ( x y -- x y x y ) over over ;
+: dupd ( x y -- x x y ) swap dup rot ;
+: -rot ( x y z -- z x y ) rot rot ;
+: rot4 ( x y z u -- y z u x ) [ rot ] dip swap ;
+: -rot4 ( x y z u -- u x y z ) swap [ -rot ] dip ;
+: 3dup ( x y z -- x y z x y z )
+  rot dup -rot4 rot dup -rot4 rot dup -rot4 ;
+: over ( x y -- x y x ) swap dup -rot ;
+: 2over ( x y z -- x y z x y ) rot dup -rot4 rot dup -rot4 ;
+: nip ( x y -- y ) swap drop ;
+: 2nip ( x y z -- z ) nip nip ;
+: pick ( x y z -- x y z x ) rot dup [ -rot ] dip ;
+
+% FRIENDS & HELPERS
+
+: swapu ( itm stk -- stk' ) swap push ;
+: unpush ( stk -- stk' itm ) dup pop swap top ;
+: empty? ( stk -- t/f ) [ ] equal? ;
+: size ( seq -- n ) dup empty? [ drop 0 ] [ pop size 1 + ] if ;
+
+: nil ( -- nil ) [ ] top ;
+: delete ( itm -- ) get-dict dissoc set-dict ;
+: values ( dict -- seq ) dup keys swap [ _|_ get ] swapu map ;
+
+% CALL A QUOTATION (ANONYMOUS ABSTRACTION)
+
+: call ( ... [ quot ] -- ... | quot )
+  [ swap unpush rot concat continue ] call/cc ;
+: fcall ( quot -- seq ) get-dict func [ ] swap apply reverse ;  
+
+% BOOLEAN VALUES, BOOLEAN CHOICE
+
+: t ( this that -- this ) drop ;
+: f ( this that -- that ) swap drop ;
+: true  ( -- t ) \ t ;
+: false ( -- f ) \ f ;
+
+: choose ( f/* this that -- that/this )
+  swap rot false equal? lookup call ;
+
+: and ( f/* f/* -- t/f ) over choose ; % Factor
+: or  ( f/* f/* -- t/f ) dupd choose ; % Factor 
+: not ( f/* -- t/f ) false true choose ;
+
+% CONTROL
+
+: if ( f/* then else -- ... ) choose call ;
+: if-not ( f/* then else -- ... ) swap if ;
+: when ( f/* then -- ... ) [ ] if ;
+: unless ( f/* else -- ... ) [ ] if-not ;
+
+: if*
+  ( ..a ? true: '( ..a ? -- ..b ') false: '( ..a -- ..b ') -- ..b )
+  pick [ drop call ] [ 2nip call ] if ; % Factor
+: when* ( ? t -- ) over [ call ] [ 2drop ] if ; % Factor
+: unless* ( ? f -- ) over [ drop ] [ nip call ] if ; % Factor
+
+SYMBOL: :else 
+: case ( val { val' quot ... } -- | quot )
+  :else over [ _|_ ] get get call ;
+
+: cond ( [ test1 then1 test2 then3 ... else ] -- | then/else )
+  dup empty?                    % anything left to test?
+    [ drop ]                    % no: quit
+    [ unpush swap dup empty?    % only one quotation left?
+      [ drop call ]             % yes: call 'else'
+      [ unpush swap             % otherwise:
+        [ ] \ cond push swapu   % prepare 'cond' recursion
+        [ call ] 2dip if ]      % call 'testN' and apply 'if'
+    if ]
+  if ;
+
+% CALL A QUOTATION AND HIDE ITEMS UNDERNEATH
+
+: dip ( x quot -- x ) [ ] rot push \ \ push concat call ;
+: 2dip ( x y quot -- x y ) swap [ dip ] dip ;
+: 3dip ( x y z quot -- x y z ) swap [ 2dip ] dip ;
+: 4dip ( w x y z quot -- w x y z ) swap [ 3dip ] dip ;
+
+% CALL A QUOTATION AND RESTORE ITEMS ON DATASTACK
+
+: keep  ( x quot -- x ) [ dup ] dip dip ;
+: 2keep ( x y quot -- x y ) [ 2dup ] dip 2dip ;
+: 3keep ( x y z quot -- x y z ) [ 3dup ] dip 3dip ;
+
+% CALL 2, 3 QUOTATIONS IN SEQUENCE, RESTORE ITEM(S) FOR NEXT CALL
+% "The cleave combinators apply multiple quotations to a single
+% value or set of values." [Factor]
+
+: bi ( x p q -- ) [ keep ] dip call ;
+: 2bi ( x y p q -- ) [ 2keep ] dip call ;
+: 3bi ( x y z p q -- ) [ 3keep ] dip call ;
+
+: tri ( x p q r -- ) [ [ keep ] dip keep ] dip call ;
+: 2tri ( x y p q r -- ) [ [ 2keep ] dip 2keep ] dip call ;
+: 3tri ( x y z p q r -- ) [ [ 3keep ] dip 3keep ] dip call ;
+
+: cleave ( x [ p q ... ] -- ) [ keep ] each drop ;
+: 2cleave ( x y [ p q ... ] -- ) [ 2keep ] each 2drop ;
+: 3cleave ( x y z [ p q ... ] -- ) [ 3keep ] each 3drop ;
+
+% CALL 1ST QUOTATION ON 1ST ITEM, 2ND QUOTATION ON 2ND ITEM
+% "The spread combinators apply multiple quotations to multiple
+% values. The asterisk (*) suffixed to these words' names
+% signifies that they are spread combinators." [Factor]
+
+% : bi* ( #X #Y [ @P ] [ @Q ] ==> #X [ @P ] | call \ #Y [ @Q ] call )
+% : bi* ( #X #Y [ @P ] [ @Q ] ==> #X | @P \ #Y @Q )
+: bi* ( x y p q -- ) [ dip ] dip call ;
+: 2bi* ( w x y z p q -- ) [ 2dip ] dip call ;
+
+% : tri* ( x y z p q r -- ) [ [ 2dip ] dip dip ] dip call ; % Factor
+: tri* ( x y z p q r -- ) [ 2dip ] 2dip bi* ;
+: 2tri* ( u v w x y z p q r -- ) [ 4dip ] 2dip 2bi* ;
+
+% The word 'spread' is currently not supported
+
+% CALL ONE QUOTATION ON MULTIPLE ITEMS
+% "The apply combinators apply a single quotation to multiple values.
+%  The at sign (@) suffixed to these words' names signifies that they
+%  are apply combinators." [Factor]
+
+: bi@ ( x y quot -- ) dup bi* ;
+: 2bi@ ( w x y z quot -- ) dup 2bi* ;
+: tri@ ( x y z quot -- ) dup dup tri* ;
+: 2tri@ ( u v w x y z quot -- ) dup dup 2tri* ;
+
+% SEQUENCE COMBINATORS
+
+: each ( seq quot -- ... )
+  swap dup empty?
+    [ 2drop ]
+    [ unpush -rot over [ call ] 2dip each ]
+  if ;
+
+: map ( seq quot -- seq' )
+  [ push ] concat [ ] -rot each reverse ;
+: reduce ( seq identity quot -- res ) [ swap ] dip each ;
+
+: filter ( seq quot -- seq' ) % quot is a predicate
+  [ dup ] swap concat
+  [ [ push ] [ drop ] if ] concat
+  [ ] -rot each reverse ;
+
+: remove ( seq quot -- seq' ) [ not ] concat filter ;
+
+% ENHANCE "GRAMMAR" (BRACKET PARSER)
+
+: [ ( -- quot ) \ [ [ scan4] continue ] call/cc ;
+: ( ( -- seq  ) \ ( [ scan4] continue ] call/cc ;
+: { ( -- map  ) \ { [ scan4] continue ] call/cc ;
+
+: scan4] ( ds cs -- ds' cs' )
+  unpush dup
+  { \ ]   [ drop [ ] rot scan4[ ]
+    \ }   over
+    \ )   over
+    \ [   [ rot swapu swap scan4] scan4] ] 
+    \ {   over
+    \ (   over
+    \ \   [ drop unpush rot swapu \ \ push swap scan4] ]
+    :else [ rot swapu swap scan4] ]
+    nil   [ \ syntax-error [ unbalanced brackets ] _|_ ]
+  } case ;
+
+: scan4[ ( cs' stk ds' -- ds'' cs'' )
+  unpush dup
+  { \ [   [ drop swap               push swap ]
+    \ {   [ drop swap fcall mapping push swap ]
+    \ (   [ drop swap fcall         push swap ]
+    \ \   [ drop unpush rot swapu \ \ push swap scan4[ ] 
+    :else [ rot swapu swap scan4[ ]
+    nil   [ \ syntax-error [ unbalanced brackets ] _|_ ]
+  } case ;
+
+: parse-quot ( quot -- quot' )
+  \ [ push reverse \ ] push reverse call ;
+
+% WRITE PROGRAMS, DEFINE WORDS
+
+: def ( wrd itm -- ) swap get-dict assoc set-dict ;
+
+: *effect* ( -- ) { } ; 
+
+: def+ ( wrd [ effect ] [ body ] -- )
+  rot dup rot def *effect* assoc [ ] swapu \ *effect* swap def ;
+: : ( | ... '; -- quot ) 
+  [ [ ] swap scan4; destruct-definition def+ continue ] call/cc ;
+
+: scan4; ( ds [ ] cs -- ds cs' quot )
+  unpush dup
+  { \ ;   [ drop swap reverse ]
+    \ \   [ drop unpush rot \ \ push swapu swap scan4; ]
+    :else [ rot swapu swap scan4; ]
+    nil   [ \ syntax-error [ incomplete definition ] _|_ ]
+  } case ;
+
+: destruct-definition ( quot -- wrd stackeffect body ) 
+  dup top swap pop      % extract word
+  [ ] swap              % prepare extraction of stack effect
+  dup top \ ( equal?    % extract stack effect
+    [ pop look4) ] when % if given
+  parse-quot ;          % and parse quotation
+
+: look4) ( [ ... ] quot -- [ ... ]' quot' )
+  unpush dup
+  { \ )   [ drop swap reverse swap ]
+    \ \   [ drop unpush rot swapu swap look4) ]
+    :else [ rot swapu swap look4) ]
+    nil   [ \ syntax-error [ incomplete stack effect ] _|_ ]
+  } case ;
+
+: SYMBOL: ( | itm -- )
+  [ unpush dup ( \ ; ) swapu \ \ push swapu \ : push
+    swap concat continue ] call/cc ;
+  
+% PRINTING
+
+: <space> ( -- space ) \space char ;
+: <newline> ( -- newline ) \newline char ;
+
+: println ( -- ) print <newline> print flush ;
+
+: repr ( itm -- wrd ) 
+  dup type
+  { \ wrd [ ]
+    \ stk [ [ ] \ [ push <space> push swap 
+            [ repr push <space> push ] each
+            \ ] push reverse word ]
+    \ map [ unmap [ ] \ { push <space> push swap
+            [ repr push <space> push ] each
+            \ } push reverse word ]
+    \ fct [ drop \ <fct> ]
+    \ nil [ drop \ nil ]
+    :else [ \ repr-error [ unknown type ] _|_ ]
+  } case ;
+
+: unbracket-stk-repr ( wrd -- wrd' ) % '[ ... ]' => '...'
+  unword
+    pop pop reverse pop pop reverse
+    dup empty? [ <space> push ] when
+  word ;
+
+: printcc ( ds cs -- ds cs )
+  swap dup reverse repr unbracket-stk-repr print
+  <space> print \ | print <space> print
+  swap dup repr unbracket-stk-repr println ;
+
+% INTERACTIVITY
+
+: reader ( -- quot )
+  \ > print <space> print flush read-line
+  [ ] \newline char push swapu word
+  uncomment tokenize ;
+
+: evaluator call ;
+
+: printer ( -- )
+  get-ds reverse repr unbracket-stk-repr println ;
+
+: repl reader evaluator printer repl ;
+
+% READING FILES
+
+: load ( wrd -- quot ) slurp uncomment tokenize ;
+: lload ( wrd -- quot ) slurp undocument uncomment tokenize ;
+: run ( wrd -- ... ) load call ;
+: lrun ( wrd -- ... ) lload call ;
+
+: prelude ( -- ... ) \ prelude.txt run ;
+: test-prelude ( -- ... ) \ prelude.tests.txt run ;
+: pprelude ( -- ... ) \ prelude-plain.txt run ;
+
+% REFLECTION & DEBUGGING
+
+: lookup ( word -- item ) get-dict \ word-not-found get ;  
+: source ( word -- ) lookup repr println ;
+
+: get-ds ( -- stk ) [ swap dup push swap continue ] call/cc ;
+: set-ds ( stk -- ) [ swap top swap continue ] call/cc ;
+: clear ( -- ) [ ] set-ds ;
+
+: abort ( -- ) [ drop [ printer repl ] continue ] call/cc ;
+: exit  ( -- ) [ drop [ ] continue ] call/cc ;
+
+: break ( -- ds cs ) [ printer repl ] call/cc ;
+
+: step ( ds cs -- ds' cs' )
+  dup empty? [ get-dict -rot stepcc rot drop ] unless ;
+
+: bstep ( ds cs -- ds' cs' )
+  unpush dup
+  { \ \   [ drop unpush [ ] swapu \ \ push ]
+    :else [ [ ] swapu ]
+    nil   [ drop [ ] ]
+  } case get-dict func swap [ apply ] dip ;
+
+% UNIT-TESTING
+
+: unit-test ( result quot -- )
+  [ \ test print [ <space> print repr print ] bi@ ] 2keep 
+  [ fcall equal? ] 2keep
+  rot
+    [ <space> print \ passed println 2drop ]
+    [ <space> print \ failed println \ with print <space> print
+      nip fcall repr println abort ]
+  if ;
+
+% SERIALIZATION & DUMPING
+
+: serialize ( quot -- quot' )
+  get-ds [ clear ] dip
+  dup top swap pop     
+  [ -serialize- get-ds ] dip
+  swap reverse push set-ds ;
+
+: -serialize- ( item -- stream-of-items )
+  dup type
+  { \ wrd [ \ \ swap ] 
+    \ stk [ \ emptystack swap reverse [ -serialize- \ push ] each ]
+    \ map [ unmap -serialize- \ mapping ]
+    \ nil [ drop \ emptystack \ top ]
+    :else [ \ serialization-error [ invalid type ] _|_ ]
+  } case ;
+
+: remove-fct-assocs ( dict -- dict' )
+  dup keys
+  [ 2dup swap \ _|_ get
+    type \ fct equal?
+      [ swap dissoc ]
+      [ drop ]
+    if ] each ;
+
+: keep-fct-assocs ( dict -- dict' )
+  dup keys
+  [ 2dup swap \ _|_ get
+    type \ fct equal?
+      [ drop ]
+      [ swap dissoc ]
+    if ] each ;
+
+: dump ( quot -- quot' )
+  [ ] get-dict remove-fct-assocs push serialize
+  swap serialize concat
+  [ continue ] concat ;
+
+: create-dump ( filename -- )
+  [ get-dict swap merge set-dict say-hi repl ] dump
+  repr unbracket-stk-repr swap spit ;
+  
+% BOOTSTRAPPING
+
+: bootimage ( -- )
+  bootstrap repr unbracket-stk-repr \ bootimage.txt spit ;
+
+: bootstrap ( -- quot )
+  [ \ def ] \ def lookup serialize concat 
+    \ def lookup concat
+  [ swapu *effect* def+ unpush -rot over
+    SYMBOL: case when if choose call t f false fcall lookup
+    scan4] scan4[ parse-quot destruct-definition
+    : scan4; look4)
+    read-word read-mapping ]
+  ( \ [ \ ( \ { ) concat
+  [ bootstrap-word concat ] each ;
+
+: bootstrap-word ( wrd -- quot )
+  [ [ ] swapu \ \ push ] keep
+  lookup serialize concat
+  [ def ] concat ;
+
+% HERE WE GO
+
+: say-hi ( -- )
+  [ ]
+  [ This is Consize -- A Concatenative Programming Language ]
+  [ push <space> push ] each
+  pop reverse word println ;
+
+say-hi repl
