@@ -1,0 +1,30 @@
+# This file tells git which files/directories should be ignored
+
+# Directories to ignore
+
+# TeX files to ignore
+*.aux
+*.log
+*.toc
+*.out
+*.bbl
+*.blg
+*.txt
+*.synctex.gz
+
+# Auxiliary Documentation to ignore
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.odt
+*.html
+*.htm
+*.url
+*.eml
+
+# Editor backups to ignore
+*.*~
+
+
+

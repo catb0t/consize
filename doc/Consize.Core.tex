@@ -1,0 +1,803 @@
+\chapter{Die VM von Consize: Der Kernel}
+\label{Sec:ConsizeVM}
+
+Dieses Kapitel legt Ihnen die Details des Consize-\href{http://de.wikipedia.org/wiki/Interpreter}{Interpreters} offen. Ein Interpreter kann als \href{http://de.wikipedia.org/wiki/Virtuelle_Maschine}{Virtuelle Maschine} (VM) bezeichnet werden, weshalb auch immer wieder von der Consize-VM gesprochen werden wird. 
+
+Die Consize-VM hat um die 50 atomare Wörter, die alle auf die eine oder andere Weise mit den Elementen des Datastacks arbeiten und\slash oder dort neue Werte ablegen. Es gibt lediglich vier Wörter, die sich nicht allein durch Manipulationen des Datastacks verstehen lassen: \verb|get-dict|, \verb|set-dict|, \verb|call/cc|, \verb|continue|. Diese vier Wörter offenbaren die Maschinerie der Virtuellen Maschine aus Datastack, Callstack und Wörterbuch. Die Logik dieser Maschinerie legt Consize jedoch vollständig mit dem Wort \verb|stepcc| offen; dieses Wort ist der Dreh- und Angelpunkt der Consize-VM und ist zentral für das Verständnis des Interpreters.
+% Alle anderen Wörter von Consize, wie z.B.\ die Wörter aus der Prelude, sind aus diesen rund 50 atomaren Wörtern abgeleitet.
+
+Die Consize-VM ist in diesem Kapitel positiv spezifiziert. Damit ist gemeint: In der Spezifikation steht das Verhalten eines Wortes beschrieben, wenn man es unter den genannten Voraussetzungen verwendet. Hält man sich nicht an die Vereinbarungen, dann ist Consize frei gestellt, wie es mit der Verletzung der Vereinbarung umgehen möchte. In der Regel versucht Consize, die Interaktion über die Konsole aufrecht zu halten und auf einen Fehler hinzuweisen; mehr dazu in Kap.~\ref{Sec:Referenzimplementierung}.
+
+Die Spezifikation gibt pro Wort in der Regel ein Beispiel der Verwendung des Wortes an. Die Beispiele setzten die geladene Prelude voraus, die Consize automatisch beim Programmstart einliest.
+
+\section{Kurzdokumentation mittels Stapeleffekten}
+
+Zu den rund 50 Wörtern gibt es eine dokumentierende Kurzform, die Ihnen hilft sich zu erinnern, welche Auswirkungen, welche Effekte das Wort auf den Datastack hat. Man spricht vom Stapeleffekt (\emph{stack effect}) eines Worts. Der Stapeleffekt wird in runden Klammern notiert. Er gibt an, was das Wort auf dem Stack erwartet und von dort entfernt und  -- durch Doppelstriche "`\verb|--|"' getrennt angegeben -- welche Situation das Wort nach Anwendung seiner mit ihm assozierten Funktionalität auf dem Datastack hinterlässt.
+
+Ein Beispiel: Das atomare Wort \verb|dup| steht für \emph{duplicate} und erzeugt ein Duplikat des obersten Werts auf dem Datastack. Der Stapeleffekt ist \verb|( x -- x x )| und besagt: \verb|dup| erwartet mindestens einen Wert auf dem Datastack, es entfernt ihn und bindet ihn gedanklich an \verb|x| -- das ist die Angabe links vom Doppelstrich. Sind mehrere Werte auf dem Datastack, so bleiben diese von \verb|dup| unberührt. Die rechte Seite vom Doppelstrich sagt aus, dass \verb|dup| zweimal das entfernte und gedanklich mit \verb|x| assoziierte Element oben auf dem Datastack ablegt. Wenn nicht mindestens ein Element auf dem Datastack ist, kann \verb|dup| seine Arbeit nicht verrichten.
+
+\begin{verbatim}
+> clear x y z dup
+x y z z
+\end{verbatim}
+
+Lassen Sie sich nicht von den Namen im Stapeleffekt verwirren. Sie sind gedankliche Stellvertreter für die tatsächlichen Elemente auf dem Datastack. In dem Beispiel ist \verb|z| das oberste zu duplizierende Element auf dem Datastack!
+
+Obwohl die Notation für Stapeleffekte informell ist, folgt sie gewissen Vereinbarungen. Meist sind die Namen nach einem der möglichen Datentypen benannt.
+
+\marginpar{Konventionen:}
+\begin{itemize}
+\item Wenn die Implementierung als Stapel nicht entscheidend ist, reden wir auch vom Stapel mit seinen Elementen als "`Folge"' oder "`Sequenz"' (\emph{sequence}); bei der Notation der Stapeleffekte wird dann oft das Kürzel \verb|seq| verwendet.
+\item Repräsentiert ein Stapel ein Programm, dann sprechen wir von einer "`Quotierung"' (\emph{quotation}), abgekürzt in den Stapeleffekten als \verb|quot|.
+\item Ein Mapping kürzen wir mit \verb|map| ab, den Spezialfall eines Wör\-ter\-buchs (\emph{dictionary}) mit \verb|dict|. 
+\item Handelt es sich um ein beliebiges Element (\emph{item}), dann kürzen wir es in den Stapeleffekten als \verb|itm| ab.
+\end{itemize}
+
+Nicht immer passen diese Konventionen, manchmal erweisen sich andere Namen als hilfreicher, die Funktion eines Wortes zu erfassen.
+
+\section{Stack Shuffler: \texttt{dup}, \texttt{swap}, \texttt{drop}, \texttt{rot}}
+
+Das Tauschen, Verschieben, Duplizieren und Entfernen von Elementen auf dem Datastack wird als \emph{stack shuffling} bezeichnet. Ganze vier Wörter reichen aus, um jedes gewünschte Arrangement der obersten drei Elemente auf dem Datastack herzustellen.
+
+\begin{description}
+\item[\texttt{dup ( x -- x x )}] dupliziert das oberste Element auf dem Datastack.
+\end{description}
+
+\begin{verbatim}
+> clear x y z dup
+x y z z
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{swap ( x y -- y x )}] vertauscht die obersten Elemente auf dem Datastack.
+\end{description}
+
+\begin{verbatim}
+> clear x y z swap
+x z y
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{drop ( x -- )}] entfernt das oberste Element auf dem Datastack.
+\end{description}
+
+\begin{verbatim}
+> clear x y z drop
+x y
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{rot ( x y z -- y z x )}] rotiert die obersten drei Elemente auf dem Datastack, wobei das "`unterste"' Element nach oben gebracht wird.
+\end{description}
+
+\begin{verbatim}
+> clear x y z rot
+y z x
+\end{verbatim}
+
+\section{Typ und Vergleich: \texttt{type}, \texttt{equal?}, \texttt{identical?}}
+
+Consize kennt insgesamt fünf Datentypen. Ein Datentyp steht für eine Menge von Datenwerten. So steht der Datentyp \verb|wrd| für die Menge aller Wörter, \verb|fct| für die Menge aller Funktionen, \verb|stk| für die Menge aller Stapel und \verb|map| für die Menge aller Mappings. Eine Sonderstellung nimmt der Typ \verb|nil| ein. Er repräsentiert einen einzigen Wert, der "`Nichts"' heißt (englisch \emph{nil}) und dann eingesetzt wird, wenn statt eines Fehlers das Resultat einer Operation als erfolglos ausgewiesen werden soll im Sinne von "`es ist `nichts' dabei herumgekommen"'. Mehr dazu in Kap.~\ref{Sec:GleichheitIdentitaet}.
+
+\begin{description}
+\item[\texttt{type ( itm -- wrd )}] ermittelt den Datentypen des obersten Elements auf dem Datastack. Der Typ ist entweder das Wort \verb|wrd|, \verb|stk|, \verb|map|, \verb|fct| oder \verb|nil|.
+\end{description}
+
+\begin{verbatim}
+> clear hi type
+wrd
+> [ 1 2 3 ] type
+wrd stk
+\end{verbatim}
+
+Sie haben ein intuitives Verständnis davon, was Gleichheit (\emph{equality}) von Werten bedeutet. Dass die Stapel \verb|[ 1 x 2 ]| und \verb|[ 1 x 2 ]| gleich sind, leuchtet Ihnen unmittelbar ein. Wir werden in Kap.~\ref{Sec:GleichheitIdentitaet} genauer definieren, was mit Gleichheit gemeint ist. In dem Kap.~\ref{Sec:GleichheitIdentitaet} wird auch das Konzept der Identität (\emph{identity}) ausführlich zur Sprache kommen. 
+
+\begin{description}
+\item[\texttt{equal? ( itm1 itm2 -- t/f )}] testet die Gleichheit der obersten zwei Elemente vom Datastack; liefert entweder \verb|t| (für \emph{true}, wahr) oder \verb|f| (für \emph{false}, falsch) zurück.
+\end{description}
+
+\begin{verbatim}
+> clear [ 1 2 3 ] [ 1 2 3 ] equal?
+t
+\end{verbatim}
+
+Das Wort \verb|identical?| ist einzig aus didaktischen Gründen in Consize vorhanden, siehe Kap.~\ref{Sec:GleichheitIdentitaet}. Es hat in einer funktionalen Sprache keine Verwendung und ist in einer Consize-Implementierung nicht erforderlich.
+
+\begin{description}
+\item[\texttt{identical? ( itm1 itm2 -- t/f )}] testet die obersten zwei Elemente auf dem Datastack auf Identität. Legt \verb|t| oder \verb|f| auf dem Datastack ab.
+\end{description}
+
+Wörter, die als Rückgabe auf dem Datastack entweder ein \verb|t| (für \emph{true}) oder \verb|f| (für \emph{false}) zurücklassen, schließen ihren Namen gerne mit einem Fragezeichen ab. In vielen Fällen ist diese Konvention hilfreich und dient als Gedächtnisstütze: Endet ein Wort mit einem Fragezeichen, ist das Resultat auf dem Stack entweder \verb|t| oder \verb|f|.
+
+\section{Stapel: \texttt{emptystack}, \texttt{push}, \texttt{top}, \texttt{pop}, \texttt{reverse}, \texttt{concat}}
+
+Der Stapel ist \emph{die} allgegenwärte Datenstruktur in Consize.
+
+\begin{description}
+\item[\texttt{emptystack ( -- [ ] )}] legt auf dem Datastack einen leeren Stapel ab.
+\end{description}
+
+\begin{verbatim}
+> clear emptystack
+[ ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{push ( stk itm -- stk' )}] erzeugt einen neuen Stapel \verb|stk'|, der das Ergebnis des Vorgangs ist, das Element \verb|itm| auf dem Stapel \verb|stk| abzulegen.
+\end{description}
+
+\begin{verbatim}
+> clear [ 1 2 3 ] 4 push
+[ 4 1 2 3 ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{top ( stk -- itm )}] legt das oberste Element \verb|itm| vom Stapel \verb|stk| auf dem Datastack ab. Bei einem leeren Stapel oder \verb|nil| liefert \verb|top| als Ergebnis \verb|nil|. 
+\end{description}
+
+\begin{verbatim}
+> clear [ 4 1 2 3 ] top
+4
+> [ ] top
+4 nil
+> nil top
+4 nil nil
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{pop ( stk -- stk' )}] legt den um das oberste Element reduzierten Stapel auf dem Datastack ab.
+\end{description}
+
+\begin{verbatim}
+> clear [ 1 2 3 ] pop
+[ 2 3 ]
+> [ ] pop
+[ 2 3 ] [ ]
+> nil pop
+[ 2 3 ] [ ] [ ]
+\end{verbatim}
+
+Der Wert für "`Nichts"' (\emph{nil}), der von \verb|top| erzeugt und auch von \verb|pop| akzeptiert wird, hat eine Sonderfunktion. Er weist das Resultat von \verb|[ ] top| als erfolglos aus; es macht keinen Sinn, von einem leeren Stapel den obersten Wert zu verlangen. Mit \emph{nil} als Wert dennoch bei \verb|top| und \verb|pop| weiter arbeiten zu können, ermöglicht die effiziente Zerlegung von Stapeln, ohne stets überprüfen zu müssen, ob der Stapel inzwischen leer ist. Abseits dieses Einsatzzwecks sollten Sie auf \emph{nil} als Datenwert verzichten.
+
+\begin{description}
+\item[\texttt{reverse ( stk -- stk' )}] kehrt die Reihenfolge der Element in einem Stapel um.
+\end{description}
+
+\begin{verbatim}
+> clear [ 1 2 3 4 5 ] reverse
+[ 5 4 3 2 1 ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{concat ( stk1 stk2 -- stk3 )}] verbindet die Elemente der beiden Stapel \verb|stk1| und \verb|stk2| zu einem neuen Stapel \verb|stk3|. Die Reihenfolge der Elemente wird gemäß der Lesart von links nach rechts beibehalten. Ein leerer Stapel konkateniert lediglich seinen "`leeren"' Inhalt.
+\end{description}
+
+\begin{verbatim}
+> clear [ 1 2 3 ] [ 4 5 ] concat
+[ 1 2 3 4 5 ]
+> [ ] concat
+[ 1 2 3 4 5 ]
+\end{verbatim}
+
+Hinweis: Die Wörter \verb|reverse| und \verb|concat| bietet die Consize-VM aus Gründen der Performanz an. Sie können als optional betrachtet werden. Man könnte diese Wörter auch in der Prelude definieren.
+
+% Gedanke: '[ ] [ 1 2 3 ] concat' könnte man als identitätserhaltend
+% für den zweiten Stapel definieren.
+
+\section{Mappings: \texttt{mapping}, \texttt{unmap}, \texttt{assoc}, \texttt{dissoc}, \texttt{get}, \texttt{keys}, \texttt{merge}}
+
+\begin{description}
+\item[\texttt{mapping ( stk -- map )}] wandelt einen Stapel in ein Mapping um. Die Elemente auf dem Stapel werden paarweise als Schlüssel- und Zielwert interpretiert. Der Stapel muss eine gerade Anzahl an Elementen haben. Ein leerer Stapel liefert ein leeres Mapping.
+\end{description}
+
+\begin{verbatim}
+> clear [ mon 1 tue 2 wed 3 thu 4 fri 5 ] mapping
+{ thu 4 tue 2 mon 1 wed 3 fri 5 }
+> clear [ ] mapping
+{ }
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{unmap ( map -- stk )}] wandelt ein Mapping in einen Stack, wobei die Assoziationen eine Folge von Schlüssel- und Zielwerten bilden. Die Reihenfolge von Schlüssel-/Zielwertpaaren ist unbestimmt. Ein leeres Mapping führt zu einem leeren Stack.
+\end{description}
+
+\begin{verbatim}
+> clear { mon 1 tue 2 wed 3 thu 4 fri 5 } unmap
+[ thu 4 tue 2 mon 1 wed 3 fri 5 ]
+> clear { } unmap
+[ ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{assoc ( val key map -- map' )}] fügt der Map \verb|map| die Assoziation aus Schlüsselwert \verb|key| und Zielwert \verb|val| hinzu und liefert die neue Map \verb|map'| zurück. Existiert ein Schlüsselwert in \verb|map| bereits, wird der Zielwert "`überschrieben"'.
+\end{description}
+
+\begin{verbatim}
+> clear 3 :radius { :type circle } assoc
+{ :radius 3 :type circle }
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{dissoc ( key map -- map' )}] legt ein Mapping \verb|map'| auf dem Datastack ab, das alle Assoziationen des Mappings \verb|map| übernimmt bis auf die Assoziation, die über den Schlüsselwert \verb|key| identifiziert ist. Existiert \verb|key| in \verb|map| nicht, bleibt das Mapping unverändert.
+\end{description}
+
+\begin{verbatim}
+> clear c { a b c d } dissoc
+{ a b }
+> clear c { a b } dissoc
+{ a b }
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{get ( key map default -- val/default )}] liefert den mit dem Schlüsselwert \verb|key| im Mapping \verb|map| assoziierten Zielwert \verb|val| zurück. Existiert die Assoziation nicht, liefert \verb|get| stattdessen den \verb|default|-Wert zurück.
+\end{description}
+
+\begin{verbatim}
+> clear thu { mon 1 tue 2 wed 3 thu 4 fri 5 } _|_ get
+4
+> clear sat { mon 1 tue 2 wed 3 thu 4 fri 5 } _|_ get
+_|_
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{keys ( map -- seq )}] gibt alle Schlüsselwerte eines Mappings \verb|map| als Sequenz \verb|seq| zurück. Die Reihenfolge der Schlüsselwerte in \verb|seq| kann beliebig sein.
+\end{description}
+
+\begin{verbatim}
+> clear { mon 1 tue 2 wed 3 thu 4 fri 5 } keys
+[ thu tue mon wed fri ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{merge ( map1 map2 -- map3 )}] fasst die zwei Mappings \verb|map1| und \verb|map2| zu einem neuen Mapping \verb|map3| zusammen. Bei gleichen Schlüsselwerten in \verb|map1| und \verb|map2| werden die Assoziationen aus \verb|map2| in \verb|map3| übernommen.
+\end{description}
+
+\begin{verbatim}
+> clear { a b c d } { c x y z } merge
+{ a b c x y z }
+\end{verbatim}
+
+Hinweis: Nicht alle Wörter zu Mappings sind unabdingbar notwendig. Die Wörter \verb|unmap|, \verb|dissoc| und \verb|merge| bietet die Consize-VM aus Gründen der Performanz an. Sie können als optional betrachtet werden, da sie mit den übrigen Wörtern der Consize-VM nachgebildet werden können.
+
+\section{Wörter: \texttt{unword}, \texttt{word}, \texttt{char}}
+
+Mit \verb|unword| und \verb|word| kann man Wörter in ihre Einzelzeichen zerlegen und mehrere Wörter zu neuen Wörtern zusammen setzen. Nützlich ist das für die Arbeit mit Ein- und Ausgaben (die mit Wörtern arbeiten) und das automatische Generieren von Wörtern. 
+
+\begin{description}
+\item[\texttt{unword ( wrd -- seq )}] zerlegt ein Wort in seine Einzelzeichen (Symbole) in Form einer Folge von Wörtern. Jedes Wort in der Folge entspricht einem Einzelzeichen.
+\end{description}
+
+\begin{verbatim}
+> clear \ push unword
+[ p u s h ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{word ( seq -- wrd )}] erwartet eine Folge von ausschließlich Wörtern und fügt diese Wörter zu einem neuen Gesamtwort zusammen. Die Folge muss mindestens ein Wort enthalten.
+\end{description}
+
+\begin{verbatim}
+> clear [ it's me ! ] word
+it'sme!
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{char ( wrd -- wrd' )}] legt auf dem Datastack ein Wort \verb|wrd'| ab, das lediglich aus einem Einzelzeichen (\emph{character}) besteht. Das Einzelzeichen wird durch das Wort \verb|wrd| kodiert. Die Kodierung erfolgt als \href{http://de.wikipedia.org/wiki/Unicode}{Unicode} mit dem Präfix "`\verb|\u|"' und vier folgenden Stellen im \href{http://de.wikipedia.org/wiki/Hexadezimalsystem}{Hexadezimalsystem} (z.B. \verb|\u0040| für das Wort \verb|@|) oder im \href{http://de.wikipedia.org/wiki/Oktalsystem}{Oktalsystem} mit dem Präfix "`\verb|\o|"' (z.B.\ \verb|\o100| ebenfalls für \verb|@|). Zusätzlich stehen als Kodierung für \verb|wrd| die Wörter
+\begin{itemize}
+\item \verb|\space| (Leerzeichen, \emph{space}),
+\item \verb|\newline| (Zeilenvorschub, \emph{line feed}),
+\item \verb|\formfeed| (Seitenvorschub \emph{form feed}),
+\item \verb|\return| (Wagenrücklauf, \emph{carriage return}),
+\item \verb|\backspace| (Rückschritt, \emph{backspace}) und
+\item \verb|\tab| (horizontaler Tabulator, \emph{tab})
+\end{itemize}
+zur Verfügung, denen die entsprechenden Zeichen bzw.\ \href{http://de.wikipedia.org/wiki/Steuerzeichen}{Steuerzeichen} als Wörter für \verb|wrd'| entsprechen. Beachten Sie, dass \verb|\space| etc.\ mit \verb|char| "`unsichtbare"' Wörter erzeugen, die z.B.\ bei der Ausgabe über die Konsole dennoch Auswirkungen als \href{http://de.wikipedia.org/wiki/Leerraum}{Leerraum} haben.
+\end{description}
+
+\begin{verbatim}
+> clear \u0040 char
+@
+\end{verbatim}
+
+\section{Konsole: \texttt{print}, \texttt{flush}, \texttt{read-}\-\texttt{line}}
+
+Zur Ein- und Ausgabe über die Konsole stellt Consize drei Wörter bereit. In der Regel erfolgen Ausgaben über die Konsole nicht direkt, sondern über den Umweg eines Puffers.
+
+\begin{description}
+\item[\texttt{print ( wrd -- )}] gibt das Wort auf der Konsole aus. Da die Ausgabe über einen \href{http://de.wikipedia.org/wiki/Puffer\_(Informatik)}{Puffer} erfolgt, kann die Ausgabe möglicherweise nicht direkt sondern zu einem späteren Zeitpunkt erfolgen. Die sofortige Ausgabe erzwingt \verb|flush|. 
+\end{description}
+
+\begin{verbatim}
+> clear \ Hello print \newline char print
+Hello
+
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{flush ( -- )}] leert den Ausgabepuffer und bringt alles, was noch im Ausgabepuffer ist, zur Ausgabe in der Konsole. Das Wort "`\emph{flush}"' heißt soviel wie "`ausspülen"'.
+\end{description}
+
+\begin{verbatim}
+> clear \ Hi print \newline char print flush
+Hi
+
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{read-line ( -- wrd )}] liest eine Zeile über die Konsole ein. Sobald die Eingabe mit der \href{http://de.wikipedia.org/wiki/Eingabetaste}{Eingabetaste} abgeschlossen ist, legt \verb|read-line| die Eingabezeile als Wort auf dem Datastack ab.
+\end{description}
+
+Geben Sie in dem nachstehenden Beispiel nach \verb|read-line| über die Tastatur "`Hello you"' ein und schließen Sie die Eingabe mit der Eingabetaste ab.
+
+\begin{verbatim}
+> clear read-line
+Hello you
+Hello you
+\end{verbatim}
+
+Die Ausgabe lässt den Eindruck aufkommen, als handele es sich um zwei Wörter auf dem Datastack. Tatsächlich ist \verb|Hello you| ein Wort, das ein Leerzeichen beinhaltet! Das wird offensichtlich, wenn Sie ein \verb|dup| eingeben.
+
+\begin{verbatim}
+> dup
+Hello you Hello you
+\end{verbatim}
+
+\section{Dateien und mehr: \texttt{slurp}, \texttt{spit}, \texttt{spit-on}}
+
+Consize unterstützt nur sehr rudimentär die Arbeit mit dem \href{http://de.wikipedia.org/wiki/Dateisystem}{Dateisystem}: das Lesen von Dateien mit \verb|slurp| und das Schreiben von Daten in Dateien mit \verb|spit| und \verb|spit-on|. Consize ist absichtlich nicht mit weiteren Fähigkeiten zum Löschen von Dateien und zum Navigieren durch das Dateisystem ausgestattet.
+
+\begin{description}
+\item[\texttt{slurp ( wrd -- wrd' )}] interpretiert das Wort \verb|wrd| als Datenquelle, liest die Daten von dort ein und legt die Daten als Wort \verb|wrd'| auf dem Datastack ab. Nur Datenquellen mit Textdaten können sinnvoll verarbeitet werden. Bei einfachen Wortnamen für \verb|wrd| liest Consize die Daten von einer namensgleichen Datei ein, die sich im Aufrufverzeichnis von Consize befindet. Die Konventionen für Dateipfade folgen \href{http://docs.oracle.com/javase/7/docs/api/java/io/File.html}{java.io}. So können auch Daten aus dem World Wide Web gelesen werden, siehe Beispiel.
+\end{description}
+
+Das folgende Beispiel zeigt, dass Sie auch Daten über das Hypertext Transfer Protokoll (HTTP) lesen können, sofern Sie online sind. Das gelieferte Ergebnis ist der Inhalt eines einzigen Wortes. Auch hier gilt wie bei \verb|read-line|: Das Wort \verb|wrd'| kann Leerzeichen, Sonder- und Steuerzeichen enthalten. Die beispielhafte Ausgabe ist natürlich abhängig vom aktuellen Inhalt der Webseite. Der besseren Lesbarkeit wegen habe ich Zeilenumbrüche hinzugefügt
+
+\begin{verbatim}
+> clear http://m.twitter.com slurp
+<html><body>You are being
+<a href="https://mobile.twitter.com/signup">redirected</a>
+.</body></html>
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{spit ( data-wrd file-wrd -- )}] schreibt das Wort \verb|data-wrd| in eine Datei unter dem Namen \verb|file-wrd| in das Dateisystem. Für \verb|file-wrd| gelten die Konventionen wie unter \verb|slurp| erwähnt. Existiert die Datei nicht, wird sie neu angelegt. Existiert die Datei bereits, wird ihr bisheriger Inhalt überschrieben.
+\end{description}
+
+Nach Eingabe des Beispiels sollten Sie im Startverzeichnis von Consize eine Datei namens \verb|dummy.txt| finden. Öffnen Sie die Datei mit einem Editor, um sich den Inhalt anzuschauen.
+
+\begin{verbatim}
+> clear \ Hello \ dummy.txt spit
+
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{spit-on ( data-wrd file-wrd -- )}] hängt das Wort \verb|data-wrd| an den Inhalt der Datei unter dem Namen \verb|file-wrd| an. Für \verb|file-wrd| gelten die Konventionen wie unter \verb|slurp| erwähnt.
+\end{description}
+
+Wenn Sie das Beispiel zu \verb|spit| ausgeführt haben, hängt Ihnen das folgende Beispiel ein \verb|You| an. In der Datei steht anschließend \verb|HelloYou|.
+
+\begin{verbatim}
+> clear \ You \ dummy.txt spit-on
+
+\end{verbatim}
+
+\section{Parsing: \texttt{uncomment}, \texttt{tokenize}, \texttt{undocument}}
+\label{Sec:Parsing}
+
+Die Wörter \verb|uncomment|, \verb|undocument| und \verb|tokenize| bearbeiten den durch ein Wort repräsentierten Inhalt seiner Einzelzeichen. Die Wörter sind insbesondere dafür gedacht, über \verb|read-line| oder \verb|slurp| eingelesene Consize-Programme einer Vorverarbeitung unterziehen zu können.
+
+\begin{description}
+\item[\texttt{uncoment ( wrd -- wrd' )}] entfernt aus einem Wort alle Kommentare. Ein Kommentar beginnt mit dem \verb|%|-Zeichen
+und geht bis zum Ende einer Zeile. Das Zeilenende wird durch einen \href{http://de.wikipedia.org/wiki/Zeilenumbruch}{Zeilenumbruch} markiert. Je nach Betriebssystem markieren die \href{http://de.wikipedia.org/wiki/Steuerzeichen}{Steuerzeichen} "`\href{http://de.wikipedia.org/wiki/Wagenr\%C3\%BCcklauf}{Wagenrücklauf}"' (\emph{carriage return}, CR) und\slash oder "`\href{http://de.wikipedia.org/wiki/Zeilenvorschub}{Zeilenvorschub}"' (\emph{line feed}, LF) den Zeilenumbruch.
+\end{description}
+
+Da \verb|read-line| im folgenden Beispiel keinen Marker für das Zeilenende setzt, müssen wir ein \verb|\newline char| zu dem eingelesenen Wort hinzufügen, damit \verb|uncomment| den Kommentar entfernen kann.
+
+\begin{verbatim}
+> read-line
+This line % has a comment
+This line % has a comment
+> [ ] \newline char push swap push word uncomment
+This line
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{tokenize ( wrd -- seq )}] zerlegt das Wort an vorhandenen Leerraum-Stellen in eine Folge von Wörtern gemäß dem \href{http://de.wikipedia.org/wiki/Regul\%C3\%A4rer\_Ausdruck}{regulären Ausdruck} "`\verb|\s*%.*[(\r\n)\r\n]|"'.
+Als \href{http://de.wikipedia.org/wiki/Leerraum}{Leerraum} (\emph{whitespace character}, "`\verb|\s|"' im regulären Ausdruck) gilt eine nicht leere Folge bzw.\ Kombination der folgenden Zeichen: Leerzeichen, horizontaler Tabulator, vertikaler Tabulator, Zeilenvorschub, Seitenvorschub und
+Wagenrücklauf. (Im regulären Ausdruck steht ein "`\verb|\n|"' für einen Zeilenvorschub und ein "`\verb|\r|"' für einen Wagenrücklauf.) Diese Definition eines Leerraums folgt dem \href{http://de.wikipedia.org/wiki/POSIX}{POSIX}-Standard für reguläre Ausdrücke.
+\end{description}
+
+\begin{verbatim}
+> read-line tokenize
+This line % has a comment
+[ This line % has a comment ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{undocumment ( wrd -- wrd' )}] extrahiert aus einem Wort lediglich die "`Zeilen"', die mit einem "`\verb|>> |"' bzw.\ "`\verb|%> |"'
+(jeweils mit einem Leerzeichen) beginnen, verwirft dabei jedoch diese Anfänge. Die Extraktion folgt dem regulären Ausdruck
+%\newline\par
+"`\verb|[(\r\n)\r\n]%?>> (.*)[(\r\n)\r\n]|"'.
+%\newline\par
+Die extrahierten Anteile werden per Wagenrücklauf und Zeilenvorschub miteinander verknüpft und als neues Wort \verb|wrd'| zurück gegeben.
+\end{description}
+
+Der Nutzen von \verb|undocument| zusammen mit \verb|slurp| liegt darin, aus einem Textfile lediglich die mit "`\verb|>> |"' bzw.\ "`\verb|%>> |"'
+beginnenden Textzeilen herauszufiltern und nur noch diese Zeilen (ohne die Präfixe) als Programmzeilen für Consize zu betrachten. Das erlaubt eine schwache Form des \href{http://de.wikipedia.org/wiki/Literate\_programming}{\emph{Literate Programming}}, wie sie auch die funktionale Programmiersprache \href{http://de.wikipedia.org/wiki/Haskell\_(Programmiersprache)}{Haskell} unterstützt. Das Literate Programming zielt darauf ab, nicht den Code zu dokumentieren, sondern die Dokumentation mit Code anzureichern. Das Wort \verb|uncomment| entfernt Kommentare aus Consize-Code, das Wort \verb|undocumment| entfernt die Dokumentation aus dokumentiertem Consize-Code. In beiden Fällen bleibt der reine Consize-Code übrig.
+
+%So wird beispielsweise der Code für die Prelude aus der Dokumentation gezogen und zwar aus der entsprechenden \href{http://de.wikipedia.org/wiki/TeX}{\TeX}-Datei. Übrigens stammt die Idee des Literate Programming von \href{http://de.wikipedia.org/wiki/Donald_Ervin_Knuth}{Donald E.\ Knuth}, dem Schöpfer von \TeX.
+
+%\begin{verbatim}
+%> clear \ Consize.Prelude.tex slurp undocument
+%% output deliberately omitted
+%\end{verbatim}
+
+Hinweise: Alle Parsing-Wörter sind nicht strikt erforderlich. Sie können allesamt durch Programme aus den übrigen Wörtern der Consize-VM nachgebildet werden und sind deshalb als optional zu betrachten. Aus Gründen der Performanz sind sie jedoch als fester Bestandteil der Consize-VM empfohlen. 
+
+\section{Funktionen: \texttt{func}, \texttt{apply}, \texttt{compose}}
+
+Die Bedeutung atomarer Wörter ist über fest vorgegebene Funktionen definiert (\emph{primitive Funktions}). Darüber hinaus kann man neue Funktionen erstellen, Funktionen miteinander komponieren und auf einen Stapel anwenden.
+
+\begin{description}
+\item[\texttt{func ( quot dict -- fct )}] erzeugt eine Funktion und initialisiert sie mit einer Quotierung \verb|quot| als Programm und einem im Kontext der Funktion gültigen Wörterbuch \verb|dict|. Die Funktion kann mit \verb|apply| aufgerufen werden. Die Semantik der mit \verb|apply| aufgerufenen Funktion ist die der wiederholten Anwendung von \verb|stepcc| auf die Continuation, die durch \verb|dict|, den über \verb|apply| übergebenen Stapel als Datastack und \verb|quot| als Callstack gegeben ist, und zwar solange, bis der Callstack (\verb|quot|) leer ist. Das Ergebnis der Funktionsanwendung mit \verb|apply| ist dann der Datastack der resultierenden vollständigen Continuation. 
+\end{description}
+
+\begin{verbatim}
+> clear [ rot swap ] get-dict func
+<fct>
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{apply ( stk fct -- stk' )}] wendet die Funktion \verb|fct| auf den Stapel \verb|stk| an. Mit anderen Worten: Der Stapel \verb|stk| ist der Datastack, mit dem die Funktion \verb|fct| aufgerufen wird. Das Ergebnis \verb|stk'| ist der resultierende Datastack aus der Funktionsanwendung.
+\end{description}
+
+Beachten Sie: Der Datastack, der Ihnen bei der Interaktion mit der Konsole angezeigt wird, hat sein offenes Stapelende rechts. Ein Stapel auf dem Datastack hat sein offenes Stapelende links.
+
+\begin{verbatim}
+> clear [ x y z ] [ rot swap ] get-dict func apply
+[ x z y ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{compose ( fct1 fct2 -- fct3 )}] liefert Funktion \verb|fct3| als Ergebnis der Funktionskomposition von \verb|fct1| und \verb|fct2| zurück.
+\end{description}
+
+\begin{verbatim}
+> clear \ rot get-dict nil get \ swap get-dict nil get compose
+<fct>
+> [ x y z ] swap apply
+[ x z y ]
+\end{verbatim}
+
+% Consize gibt Daten auf dem Datenstapel als Literale aus. Das meint: Die Daten werden in einer Notation angezeigt, d.h. in einer Folge von Worten, die -- würde man sie als Programm eingeben -- den gleichen Datenwert wieder erzeugen.
+
+\section{Continuations: \texttt{stepcc}, \texttt{call/cc}, \texttt{continue}, \texttt{get-dict}, \texttt{set-}\-\texttt{dict}, \texttt{{\char "5C}}}
+\label{Sec:Continuations}
+
+Ein Mapping und zwei Stapel heißen vollständige Continuation, sofern das Mapping als Wörterbuch, der eine Stapel als Datastack und der andere Stapel als Callstack interpretiert werden. Eine vollständige \href{http://de.wikipedia.org/wiki/Continuation}{Continuation} repräsentiert über das Wörterbuch und den Datastack nicht nur den aktuellen Zustand eines Rechenprozesses, sondern über den Callstack auch das zu bearbeitende Programm, sozusagen die gesamte rechnerische "`Zukunft"'. Als (verkürzte) Continuation bezeichnen wir die Kombination von Data- und Callstack ohne Wörterbuch.
+
+Das Wort \verb|stepcc| definiert einen einzelnen Rechenschritt einer voll\-stän\-di\-gen Continuation. Das Wort \verb|stepcc| erwartet also die drei Anteile einer Continuation auf dem Datastack und liefert auch wieder die drei Anteile einer Continuation zurück. Über \verb|stepcc| sind darüber hinaus vier weitere Wörter definiert, die den expliziten Umgang mit einer verkürzten Continuation  (\verb|call/cc| und \verb|continue|) und dem Wörterbuch (\verb|get-dict| und \verb|set-dict|) innerhalb eines "`normalen"' Programms erlauben.
+
+\begin{description}\label{description.stepcc}
+\item[\texttt{stepcc ( dict ds cs -- dict' ds' cs' )}] erwartet auf dem Datastack ein Wörterbuch \verb|dict| und zwei Stapel \verb|ds| und \verb|cs|. Die drei Datenwerte werden als voll\-stän\-di\-ge Continuation aufgefasst. \verb|stepcc| definiert einen Rechenschritt in Consize und ermittelt die resultierende vollständige Continuation \verb|dict'|, \verb|ds'| und \verb|cs'|. Zum leichteren Verständnis vereinbaren wir folgende \href{http://de.wikipedia.org/wiki/Substitution\_(Logik)}{Substitutionen} (Ersetzungen):\footnote{Bitte verwechseln Sie das Gleichheitszeichen auf keinen Fall mit einer Zuweisung. Wann immer die linke Seite vom Gleichheitszeichen erscheint, wie z.B.\ \texttt{itm}, ist sie "`gedanklich"' zu ersetzen mit der rechten Seite vom Gleichheitszeichen; bei \texttt{itm} mit \texttt{cs top}.}
+\begin{itemize}
+\item \verb|itm| $=$ \verb|cs top| -- ist das erste Element auf \verb|cs|
+\item \verb|rcs| $=$ \verb|cs pop| -- ist der Rest von \verb|cs|
+\item \verb|head| $=$ \verb|ds top| -- ist das erste Element auf \verb|ds|
+\item \verb|tail| $=$ \verb|ds pop| -- ist der Rest von \verb|ds|
+\item \verb|res| $=$ \verb|itm dict nil get| ist der mit \verb|itm| assoziierte Wert in \verb|dict|
+\end{itemize}
+Die resultierende Continuation wird ebenfalls durch Substitutionen für \verb|dict'|, \verb|ds'| bzw.\ \verb|cs'| angegeben. Sofern in den Fallunterscheidungen nichts anderes angegeben ist, gilt grundsätzlich \verb|dict'|$ =$ \verb|dict|, \verb|cs'| $=$ \verb|rcs|, \verb|ds'| $=$ \verb|ds|.
+\begin{enumerate}
+\item Ist \verb|itm| ein Wort und \marginpar{Wort auf \texttt{cs} führt zu \dots}
+  \begin{enumerate}
+  \item \verb|res| ein Stack:
+    \marginpar{\dots\ Konkatenation}
+    \verb|cs'| $=$ \verb|res rcs concat|
+  \item \verb|res| eine Funktion:
+    \marginpar{\dots\ Funktionsanwendung}
+    \verb|ds'| $=$ \verb|ds res apply|
+  \item weder\slash noch:
+    \marginpar{\dots\ Spezialwortvergleich}
+    Ist \verb|itm| gleich dem Wort
+    \begin{enumerate}
+    \item \verb|call/cc|:\seealso{\texttt{call/cc}}
+       \newline\verb|ds'| $=$ \verb|[ ] tail push rcs push|,    
+       \newline\verb|cs'| $=$ \verb|head|
+    \item \verb|continue|:\seealso{\texttt{continue}}
+       \newline\verb|ds'| $=$ \verb|tail top|,
+       \newline\verb|cs'| $=$ \verb|head|
+    \item \verb|get-dict|:\seealso{\texttt{get-dict}}
+       \newline\verb|ds'| $=$ \verb|ds dict push|
+    \item \verb|set-dict|:\seealso{\texttt{set-dict}}
+       \newline\verb|dict'| $=$ \verb|head|,
+       \newline\verb|ds'| $=$ \verb|tail|
+    \item ansonsten:
+       \marginpar{\dots\ \texttt{read-word}}
+       \newline\verb|ds'| $=$ \verb|ds itm push|,
+       \newline\verb|cs'| $=$ \verb|rcs \ read-word push|
+    \end{enumerate}
+  \end{enumerate}
+\item Ist \verb|itm| ein Mapping:
+  \marginpar{Mapping auf \texttt{cs} führt zu \dots}
+  \newline\verb|ds'| $=$ \verb|ds itm push|,
+  \marginpar{\dots\ \texttt{read-mapping}}
+  \newline\verb|cs'| $=$ \verb|rcs \ read-mapping push|
+\item Ist \verb|itm| weder ein Wort noch ein Mapping:
+  \marginpar{Sonstiges Element auf \texttt{cs} \dots}
+  \newline\verb|ds'| $=$ \verb|ds itm push|
+  \marginpar{\dots\ wandert auf \texttt{ds}}
+\end{enumerate}
+\end{description}
+
+In dieser formalen Darstellung stellt sich die Spezifikation des Verhaltens von \verb|stepcc| ein wenig komplizierter dar, als sie es wirklich ist. Freisprachlich formuliert arbeitet \verb|stepcc| wie folgt:
+
+Befindet sich auf \verb|cs| ein Wort und findet sich zu diesem Wort im Wör\-ter\-buch \verb|dict| eine Quotierung, dann "`ersetzt"' der Inhalt der Quotierung das Wort. Die Ersetzung geschieht durch Konkatenation der Quotierung \verb|res| und dem Rest von \verb|cs|, \verb|rcs|.
+
+\begin{verbatim}
+> clear { \ -rot [ rot rot ] } [ z y x ] [ -rot swap ] stepcc
+{ -rot [ rot rot ] } [ z y x ] [ rot rot swap ]
+\end{verbatim}
+
+Findet sich im Wörterbuch stattdessen eine Funktion, dann wird die Funktion auf \verb|ds| angewendet. Mit \verb|get-dict| wird das aktuell gültige Wörterbuch auf dem Datastack abgelegt.
+
+\begin{verbatim}
+> clear { \ rot dup get-dict nil get }
+{ rot <fct> }
+> [ z y x ] [ rot swap ] stepcc
+{ rot <fct> } [ x z y ] [ swap ]
+\end{verbatim}
+
+Ist das Wort auf dem \verb|cs| weder mit einer Quotierung noch mit einer Funktion assoziiert, überprüft \verb|stepcc|, ob das Wort \verb|call/cc|, \verb|continue|, \verb|get-dict| oder \verb|set-dict| ist -- die Effekte dieser Wörter sind in eigenen Abschnitten noch einmal beschrieben. Trifft keiner dieser Vergleiche zu, dann ist das Wort unbekannt und \verb|stepcc| entfernt das Wort von \verb|cs| und legt es auf \verb|ds| ab. Das Wort \verb|read-word| wird auf dem verbliebenen \verb|cs|, \verb|rcs|, abgelegt.
+
+\begin{verbatim}
+> clear { } [ z y x ] [ rot swap ] stepcc
+{ } [ rot z y x ] [ read-word swap ]
+\end{verbatim}
+
+Auf diese Weise kann mittels \verb|read-word| ein Verhalten für unbekannte Wörter vom Anwender selbst definiert werden. Anders ausgedrückt: \verb|read-word| ist ein Meta-Wort zur Definition des Umgangs mit unbekannten Wörtern. Ein Meta-Wort verweist auf die Existenz einer \href{http://de.wikipedia.org/wiki/Metaebene}{Metaebene}, die es erlaubt, das Verhalten von Elementen auf der "`Sachebene"' zu beschreiben.
+
+Ähnlich ist der Umgang mit Mappings. Ist das oberste Element auf \verb|cs| kein Wort, sondern ein Mapping, dann entfernt \verb|stepcc| das Mapping von \verb|cs|, legt es auf \verb|ds| ab und legt das Wort \verb|read-mapping| auf dem Rest von \verb|cs|, \verb|rcs|, ab.
+
+\begin{verbatim}
+> clear { } [ z y x ] [ swap ] { a b } push stepcc
+{ } [ { a b } z y x ] [ read-mapping swap ]
+\end{verbatim}
+
+Das Wort \verb|read-mapping| ist ein Meta-Wort, mit dem der Anwender das Verhalten im Umgang mit Mappings definieren kann.
+
+Ist das oberste Elemente auf \verb|cs| weder ein Wort noch ein Mapping, dann legt \verb|stepcc| es auf dem \verb|ds| ab.
+
+\begin{verbatim}
+> clear { } [ z y x ] [ [ 1 2 3 ] swap ] stepcc
+{ } [ [ 1 2 3 ] z y x ] [ swap ]
+\end{verbatim}
+
+\attention Die Bedeutung von \verb|stepcc| ist, dass es gemeinsam mit \verb|func| den "`Antriebsmotor"' von Consize definiert. Eine mit \verb|func| erzeugte und mit \verb|apply| auf einen Stapel angewendete Funktion ist in ihrer Ausführung zu verstehen als fortwährende Anwendung von \verb|stepcc| auf die via \verb|func| und \verb|apply| gegebene vollständige Continuation -- und zwar solange, bis der Callstack der vollständigen Continuation abgearbeitet, sprich leer ist. Das Ergebnis der Abarbeitung ist der Datastack.
+
+\begin{description}
+\item[\texttt{call/cc ( quot -- ds' cs' )}] legt den Datastack (ohne \verb|quot|) und den Callstack (ohne \verb|call/cc|) der aktuellen Continuation auf dem Datastack ab und ersetzt anschließend den aktuellen Callstack durch die Quotierung \verb|quot|. Da \verb|call/cc| ohne \verb|continue| kaum vernünftig einzusetzen ist, ist hier der Stackeffekt in Anlehnung an die Definition unter \seealso{\texttt{stepcc}}\verb|stepcc| angegeben mit \verb|ds' cs'|. Dieser Stapeleffekt präsentiert die Regel, erfasst aber nicht die Ausnahme von der Regel.
+\end{description}
+
+"`\verb|call/cc|"' steht übrigens für "`\emph{call with current continuation}"': rufe die Quotierung als Programm auf mit der aktuellen (verkürzten) Continuation auf dem Datastack.
+
+Das Beispiel verwendet das Wort \verb|printer| aus der Prelude; \verb|printer| gibt den aktuellen Stand des Datastacks auf der Konsole aus. Zu \verb|continue| siehe die Spezifikation des Wortes.
+
+\begin{verbatim}
+> clear x y z [ printer continue ] call/cc rot
+[ z y x ] [ rot printer repl ]
+y z x
+\end{verbatim}
+
+Wenn das Wort \verb|call/cc| durch \verb|stepcc| in der Bearbeitung ist, dann sieht die Situation auf dem Data- und Callstack wie folgt aus:
+
+\begin{verbatim}
+x y z [ printer continue ] | call/cc rot printer repl
+\end{verbatim}
+
+Dass sich hinter dem \verb|rot| ein \verb|printer| und \verb|repl| anschließen, ist in der Prelude programmiert; so wird der interaktive Modus über die Konsole realisiert. Das Wort \verb|call/cc| verwandelt die Situation auf Data- und Callstack folgendermaßen:
+
+\begin{verbatim}
+[ z y x ] [ rot printer repl ] | printer continue
+\end{verbatim}
+
+Es wird das Wort \verb|printer| ausgeführt, das den Datastack auf der Konsole ausgibt, dann das Wort \verb|continue|, das die verkürzte Continuation auf dem Datastack wieder aktiviert und die Programmausführung fortsetzt.
+
+\begin{description}
+\item[\texttt{continue ( ds cs -- ds | cs )}] lässt die Stapel \verb|ds| und \verb|cs| als Datastack und Callstack die Programmausführung übernehmen. Das Wort \verb|continue| ist im Zusammenhang mit \seealso{\texttt{stepcc}}\verb|stepcc| als Spezialwort definiert. Der Stapeleffekt auf der rechten Seite soll andeuten, dass sich die Situation auf dem Datastack ergibt aus der Abarbeitung der Continuation \verb|ds| \verb|cs|.
+\end{description}
+
+Mit \verb|continue| können zwei beliebige Stapel als Datenstack und Callstack interpretiert die Programmausführung übernehmen.
+
+\begin{verbatim}
+> clear [ z y x ] [ rot printer repl ] continue
+y z x
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{get-dict ( -- dict )}] hinterlässt auf dem Datastack das Wörterbuch der aktuellen, in der Abarbeitung befindlichen Continuation. Das Wort \verb|get-dict| ist im Zusammenhang mit \seealso{\texttt{stepcc}}\verb|stepcc| als Spezialwort definiert.
+\end{description}
+
+Wenn Sie \verb|get-dict| an der Konsole eingeben dauert die Aufbereitung der Ausgabe eine Weile. Haben Sie ein wenig Geduld.
+
+\begin{verbatim}
+> clear get-dict
+% output deliberately omitted
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{set-dict ( dict -- )}] nimmt das Mapping \verb|dict| vom Datastack und setzt das Wörterbuch der aktuellen Continuation gleich \verb|dict|. Das Wort \verb|set-dict| ist im Zusammenhang mit \seealso{\texttt{stepcc}}\verb|stepcc| als Spezialwort definiert.
+\end{description}
+
+Das Beispiel fügt ein neues Wort \verb|2pop| mit der Bedeutung \verb|pop pop| zum aktuellen Wörterbuch hinzu.
+
+\begin{verbatim}
+> clear [ pop pop ] \ 2pop get-dict assoc set-dict
+
+> [ x y z ] 2pop
+[ z ]
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{{\char "5C}\ ( -- itm )}] holt das dem Wort \verb|\| folgende Element auf dem Callstack vom Callstack und legt es auf dem Datastack ab. Das Wort \verb|\| wird auch als "`Quote"' oder "`Escape"' bezeichnet. Es verhindert die Interpretation von Daten auf dem Callstack. Das Wort ist definiert über das folgende Programm:
+\begin{verbatim}
+[ dup top rot swap push swap pop continue ] call/cc
+\end{verbatim}
+\end{description}
+
+Sie können die Definition von \verb|\| direkt überprüfen, indem Sie es im Wörterbuch nachschlagen.
+
+\begin{verbatim}
+> \ \ get-dict nil get
+[ [ dup top rot swap push swap pop continue ] call/cc ]
+\end{verbatim}
+
+Ohne ein Quote-Wort ist es nicht möglich, ein Wort wie z.B.\ \verb|rot| als Datum zu behandeln. Es würde sonst immer ausgeführt werden.
+
+\begin{verbatim}
+> clear \ rot
+rot
+\end{verbatim}
+
+\section{Arithmetik: \texttt{+}, \texttt{-}, \texttt{*}, \texttt{div}, \texttt{mod}, \texttt{<}, \texttt{>}, \texttt{integer?}}
+
+Consize bietet ein paar Wörter an, die Wörter als Zahlen interpretieren und damit das Rechnen mit Zahlen (\href{http://de.wikipedia.org/wiki/Arithmetik}{Arithmetik}) sowie einfache Zahlenvergleiche (größer, kleiner) ermöglichen. Nachfolgend sind die Angaben \verb|x|, \verb|y| und \verb|z| in den Stapeleffekten Wörter, die \href{http://de.wikipedia.org/wiki/Ganze\_Zahlen}{ganze Zahlen} repräsentieren. Allerdings sind Ganzzahlen nicht als eigenständiger Datentyp in Consize vertreten, Zahlen sind Wörter.
+
+\begin{description}
+\item[\texttt{+ ( x y -- z )}] liefert mit \verb|z| die Summe \verb|x|$+$\verb|y| zurück; \verb|+| realisiert die \href{http://de.wikipedia.org/wiki/Addition}{Addition}.
+\end{description}
+
+\begin{verbatim}
+> 2 3 +
+5
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{- ( x y -- z )}] liefert mit \verb|z| die Differenz \verb|x|$-$\verb|y| zurück; \verb|-| realisiert die \href{http://de.wikipedia.org/wiki/Subtraktion}{Subtraktion}.
+\end{description}
+
+\begin{verbatim}
+> 2 3 -
+-1
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{* ( x y -- z )}] liefert mit \verb|z| das Produkt \verb|x|$\cdot$\verb|y| zurück; \verb|*| realisiert die \href{http://de.wikipedia.org/wiki/Multiplikation}{Multiplikation}.
+\end{description}
+
+\begin{verbatim}
+> 2 3 *
+6
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{div ( x y -- z )}] liefert mit \verb|z| den ganzzahligen Wert des Quotienten \verb|x|$:$\verb|y| zurück; \verb|div| realisiert die ganzzahlige \href{http://de.wikipedia.org/wiki/Division\_(Mathematik)}{Division}. Der Divisor \verb|y| muss von \verb|0| verschieden sein.
+\end{description}
+
+\begin{verbatim}
+> 7 3 div
+2
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{mod ( x y -- z )}] liefert mit \verb|z| den Rest der Division \verb|x|$:$\verb|y| zurück; \verb|mod| realisiert den Divisionsrest, "`\href{http://de.wikipedia.org/wiki/Modulo#Modulo}{Modulo}"' genannt.
+%(Siehe auch "`\href{http://de.wikipedia.org/wiki/Modulo#Implementierung\_in\_Computersystemen}{Implementierung in Computersystemen}"'.)
+Die Zahl \verb|y| muss von \verb|0| verschieden sein.
+\end{description}
+
+\begin{verbatim}
+> 7 3 mod
+1
+\end{verbatim}
+
+Die Vergleichsoperatoren \verb|<|, \verb|>| etc.\ nutzen die \href{http://de.wikipedia.org/wiki/Ordnungsrelation}{Ordnungsrelation} unter den Zahlen, die man sich z.B.\ anhand eines \href{http://de.wikipedia.org/wiki/Zahlengerade}{Zahlenstrahls} veranschaulichen kann.
+
+\begin{description}
+\item[\texttt{< ( x y -- t/f )}] liefert als Ergebnis des Vergleichs \verb|x|$<$\verb|y| entweder \verb|t| (für wahr, \emph{true}) oder \verb|f| (für falsch, \emph{false}) zurück.
+\end{description}
+
+\begin{verbatim}
+> 7 3 <
+f
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{> ( x y -- t/f )}] liefert als Ergebnis des Vergleichs \verb|x|$>$\verb|y| entweder \verb|t| oder \verb|f| zurück.
+\end{description}
+
+\begin{verbatim}
+> 7 3 >
+t
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{integer? ( x -- t/f )}] testet, ob das Wort \verb|x| eine Ganzzahl (\emph{integer}) repräsentiert, und liefert als Ergebnis entweder \verb|t| oder \verb|f| zurück.
+\end{description}
+
+\begin{verbatim}
+> -7 integer?
+t
+> x integer?
+f
+\end{verbatim}
+
+Hinweis: Alle Wörter zur Arithmetik sind optional und können durch Consize-Programme in der Prelude vollständig ersetzt werden. Sie sind lediglich aus Performanzgründen in der Consize-VM enthalten. Die Referenzimplementierung von Consize rechnet mit Ganzzahlen beliebiger Größe. Notwendig ist jedoch lediglich die Unterstützung von Ganzzahlen mit mindestens 16~Bit Genauigkeit (\href{http://de.wikipedia.org/wiki/Integer\_(Datentyp)}{Integer}), d.h.\ mit einem Wertebereich von $-32.768$ bis $+32.767$. Für Berechnungen mit \verb|current-time-millis| sind jedoch mindestens 32~Bit erforderlich.
+
+\section{Extras: \texttt{current-time-millis}, \texttt{operating-system}}
+\label{Sec:Core.Extras}
+
+Die zwei Wörter \verb|current-time-millis| und \verb|operating-system| erlauben einerseits z.B.\ die Messung der Laufzeit von Programmen oder die Initialisierung von Zufallsgeneratoren und andererseits z.B.\ den korrekten Umgang mit Zeilenumbrüchen je nach Betriebssystem.
+
+\begin{description}
+\item[\texttt{current-time-millis ( -- wrd )}] liefert als Wort die Anzahl der \href{http://de.wikipedia.org/wiki/Millisekunde#Abgeleitete\_Ma.C3.9Feinheiten}{Millisekunden} zurück, die seit dem 1. Januar 1970 (\href{http://de.wikipedia.org/wiki/UTC}{UTC}, Universal Time Coordinated), der so genannten \href{http://de.wikipedia.org/wiki/Unixzeit}{Unixzeit}, verstrichen sind.
+\end{description}
+
+Natürlich hängt die beispielhafte Ausgabe von Ihrer aktuellen Zeit ab.
+
+\begin{verbatim}
+> clear current-time-millis
+1347630655230
+\end{verbatim}
+
+\begin{description}
+\item[\texttt{operating-system ( -- wrd )}] gibt als Wort das verwendete \href{http://de.wikipedia.org/wiki/Betriebssystem}{Betriebssystem} zurück, unter dem Consize läuft. Das Wort kann Leerzeichen im Namen enthalten.
+\end{description}
+
+Im Beispiel läuft Consize unter dem Betriebssystem Windows 7.
+
+\begin{verbatim}
+> clear operating-system
+Windows 7
+\end{verbatim}
+
+Hinweis: Die Wörter \verb|current-time-millis| und \verb|operating-system| sind optional. Man kann, wenn man möchte, Laufzeitmessungen von Programmen auch durch die Anzahl der Aufrufe von \verb|stepcc| vornehmen.
+
+\section{Der Start der VM}
+
+Der Start der VM sei definiert anhand eines fiktiven Wortes \verb|(main)|. Der Start von Consize entspricht der Semantik von \verb|(main)|.
+
+\begin{description}
+\item[\texttt{(main) ( file -- | quot )}] versteht das auf dem Datastack liegende Wort \verb|file| als Dateinamen (in der Grundeinstellung lautet das Wort \verb|prelude.txt|), es lädt die Datei (\verb|slurp|), entfernt Kommentare (\verb|uncomment|) und zerlegt den Dateitext in einzelne Worte (\verb|tokenize|). Die resultierende Folge von Wörtern ist die Quotierung \verb|quot|. 
+
+Alle Wörter dieses Kapitels bilden zusammen mit den Bedeutungsdefinitionen das Ur-Wörterbuch \verb|root-dict|. Consize definiert über \verb|quot| und \verb|root-dict| mittels \verb|func| eine Funktion, die per \verb|apply| auf einen leeren Stapel, der den Datastack repräsentiert, angewendet wird.
+
+Das fiktive Wort \verb|(main)| ist folglich definiert durch:
+\begin{verbatim}
+[ ] \ prelude.txt
+slurp uncomment tokenize root-dict func apply
+\end{verbatim}
+Der rechte Anteil des Stapeleffekts zeigt an, dass die Situation auf dem Datastack das Ergebnis einer Abarbeitung der Quotierung \verb|quot| bei leerem Datastack ist.
+\end{description}
+
+\attention In der von Consize gelesenen Datei, der Prelude, sind in der Regel die zwei Meta-Wörter \verb|read-word| und \verb|read-mapping| zu definieren. Ansonsten führt das Auftreten eines unbekannten Wortes zu \verb|read-word|, was seinerseits ein unbekanntes Wort ist -- und der Vorgang findet keine Ende. Ähnliches gilt bei einem nicht definierten \verb|read-mapping|.
+
+\section{Referenzimplementierung}
+\label{Sec:Referenzimplementierung}
+
+Für Consize liegt eine Referenzimplementierung in der funktionalen Sprache \href{http://clojure.org/}{Clojure} vor, die die Consize-VM komplett umsetzt. Das Clojure-Programm ist weniger als 150 Programmzeilen lang! Es läuft unter der \href{http://de.wikipedia.org/wiki/Java\_Virtual\_Machine}{Java Virtual Machine} (JVM). Die Clojure-Implementierung ist im Zweifel der freisprachlichen Spezifikation vorzuziehen -- allerdings ist dafür ein Verständnis der Sprache Clojure erforderlich.
+
+Alternative Implementierungen der Consize-VM müssen das Verhalten der Referenzimplementierung nachbilden, wenn sie sich als "`Consize-VM"' bezeichnen wollen; ausgenommen ist das Wort \verb|identity?|. Als Basis der Verhaltensgleichheit können die Test-Suites für die Consize-VM und die Prelude herangezogen werden.
+
+Optionale Wörter der Consize-VM müssen, sofern sie nicht Teil einer Consize-Implementierung sind, in einer angepassten Prelude bereitgestellt werden. Von dieser Regelung ausgenommen sind die Wörter aus Kap.~\ref{Sec:Core.Extras}.
+
+Im Fall eines Fehlers versucht Consize die Interaktion aufrecht zu halten. Consize legt auf dem Callstack das Wort \verb/_|_/ (sprich "`\emph{bottom}"') ab und auf dem Datastack den Zustand der Continuation beim Auftreten des Problems. Eine Continuation besteht hier aus dem Abbild von Datastack und Callstack.
